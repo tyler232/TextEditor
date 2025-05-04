@@ -8,12 +8,11 @@
 #include <sys/select.h>
 #include <sys/ioctl.h>
 
-
 /*** Defines ***/
 
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_LINES 100
-
+#define MAX_SEARCH_LEN 80
 
 /*** Terminal ***/
 
@@ -53,6 +52,12 @@ int clip_len; // length of clipboard content
 int rowoff; // row offset for scrolling
 int editor_rows = 24;
 int editor_cols = 80;
+int search_mode; // 0 = not searching, 1 = entering query, 2 = active search
+char search_query[MAX_SEARCH_LEN];
+int search_query_len;
+struct { int x, y; } search_matches[MAX_LINES * 10]; // store match positions
+int num_matches;
+int current_match; // index of current match in search_matches
 
 /*** Input ***/
 
@@ -74,6 +79,11 @@ void copySelection();
 void cutSelection();
 void deleteSelection();
 void pasteClipboard();
+void enterSearchMode();
+void exitSearchMode();
+void performSearch();
+void findNext();
+void findPrevious();
 
 /*** Output ***/
 
@@ -110,6 +120,93 @@ void enableRawMode() {
     raw.c_cc[VTIME] = 1;
 
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) die("tcsetattr");
+}
+
+/*** Search Functions ***/
+
+void enterSearchMode() {
+    search_mode = 1;
+    search_query[0] = '\0';
+    search_query_len = 0;
+    num_matches = 0;
+    current_match = -1;
+    snprintf(statusmsg, sizeof(statusmsg), "[Search Mode] Enter query: ");
+    editorRefreshScreen();
+}
+
+void exitSearchMode() {
+    search_mode = 0;
+    snprintf(statusmsg, sizeof(statusmsg), "[Normal Mode]");
+    editorRefreshScreen();
+}
+
+void performSearch() {
+    if (search_query_len == 0) {
+        exitSearchMode();
+        return;
+    }
+
+    num_matches = 0;
+    current_match = -1;
+
+    for (int y = 0; y < num_lines; y++) {
+        if (!lines[y]) continue;
+        char *pos = lines[y];
+        while ((pos = strstr(pos, search_query)) != NULL) {
+            if (num_matches < MAX_LINES * 10) {
+                search_matches[num_matches].x = pos - lines[y];
+                search_matches[num_matches].y = y;
+                num_matches++;
+            }
+            pos++; // move past current match
+        }
+    }
+
+    if (num_matches > 0) {
+        current_match = 0;
+        cx = search_matches[0].x;
+        cy = search_matches[0].y;
+        // adjust scroll to show match
+        if (cy < rowoff) rowoff = cy;
+        if (cy >= rowoff + editor_rows) rowoff = cy - editor_rows + 1;
+        snprintf(statusmsg, sizeof(statusmsg), "[Search Mode] %d matches found", num_matches);
+    } else {
+        snprintf(statusmsg, sizeof(statusmsg), "[Search Mode] No matches found");
+    }
+
+    search_mode = 2;
+    editorRefreshScreen();
+}
+
+void findNext() {
+    if (search_mode != 2 || num_matches == 0) return;
+
+    current_match = (current_match + 1) % num_matches;
+    cx = search_matches[current_match].x;
+    cy = search_matches[current_match].y;
+
+    // adjust scroll to show match
+    if (cy < rowoff) rowoff = cy;
+    if (cy >= rowoff + editor_rows) rowoff = cy - editor_rows + 1;
+
+    snprintf(statusmsg, sizeof(statusmsg), "[Search Mode] Match %d/%d", current_match + 1, num_matches);
+    editorRefreshScreen();
+}
+
+void findPrevious() {
+    if (search_mode != 2 || num_matches == 0) return;
+
+    current_match = (current_match - 1);
+    if (current_match < 0) current_match = num_matches - 1;
+    cx = search_matches[current_match].x;
+    cy = search_matches[current_match].y;
+
+    // adjust scroll to show match
+    if (cy < rowoff) rowoff = cy;
+    if (cy >= rowoff + editor_rows) rowoff = cy - editor_rows + 1;
+
+    snprintf(statusmsg, sizeof(statusmsg), "[Search Mode] Match %d/%d", current_match + 1, num_matches);
+    editorRefreshScreen();
 }
 
 /*** Input Functions ***/
@@ -560,8 +657,36 @@ void processKeypress() {
     // Esc always returns to normal mode
     if (c == '\x1b') {
         visual_mode = 0;
-        snprintf(statusmsg, sizeof(statusmsg), "[Normal Mode]");
+        if (search_mode) exitSearchMode();
+        else snprintf(statusmsg, sizeof(statusmsg), "[Normal Mode]");
         editorRefreshScreen();
+        return;
+    }
+
+    if (search_mode == 1) {
+        // entering search query
+        if (c == '\r') { // Enter
+            performSearch();
+        } else if (c == 127) { // Backspace
+            if (search_query_len > 0) {
+                search_query[--search_query_len] = '\0';
+                snprintf(statusmsg, sizeof(statusmsg), "[Search Mode] Enter query: %s", search_query);
+                editorRefreshScreen();
+            }
+        } else if (c >= 32 && c <= 126 && search_query_len < MAX_SEARCH_LEN - 1) {
+            search_query[search_query_len++] = c;
+            search_query[search_query_len] = '\0';
+            snprintf(statusmsg, sizeof(statusmsg), "[Search Mode] Enter query: %s", search_query);
+            editorRefreshScreen();
+        }
+        return;
+    } else if (search_mode == 2) {
+        // active search mode
+        if (c == 'n') {
+            findNext();
+        } else if (c == 'p') {
+            findPrevious();
+        }
         return;
     }
 
@@ -569,6 +694,8 @@ void processKeypress() {
         write(STDOUT_FILENO, "\x1b[2J", 4);
         write(STDOUT_FILENO, "\x1b[H", 3);
         exit(0);
+    } else if (c == CTRL_KEY('f')) {
+        enterSearchMode();
     } else if ((c == CTRL_KEY('v') || c == 'v') && !visual_mode) {
         toggleVisualMode();
         editorRefreshScreen();
@@ -650,6 +777,30 @@ void editorDrawRows() {
                 } else {
                     write(STDOUT_FILENO, lines[file_y], strlen(lines[file_y]));
                 }
+            } else if (search_mode == 2 && num_matches > 0) {
+                // highlight search matches
+                int len = strlen(lines[file_y]);
+                int x = 0;
+                while (x < len) {
+                    int is_match = 0;
+                    for (int i = 0; i < num_matches; i++) {
+                        if (search_matches[i].y == file_y && search_matches[i].x == x) {
+                            is_match = 1;
+                            break;
+                        }
+                    }
+                    if (is_match) {
+                        write(STDOUT_FILENO, "\x1b[44m", 5); // blue background
+                        for (int j = 0; j < search_query_len && x + j < len; j++) {
+                            write(STDOUT_FILENO, &lines[file_y][x + j], 1);
+                        }
+                        write(STDOUT_FILENO, "\x1b[0m", 4); // reset
+                        x += search_query_len;
+                    } else {
+                        write(STDOUT_FILENO, &lines[file_y][x], 1);
+                        x++;
+                    }
+                }
             } else {
                 write(STDOUT_FILENO, lines[file_y], strlen(lines[file_y]));
             }
@@ -708,12 +859,11 @@ void drawStatusBar() {
     write(STDOUT_FILENO, "\x1b[0m", 4);
 }
 
-
 void editorRefreshScreen() {
     write(STDOUT_FILENO, "\x1b[2J", 4);
-    write(STDOUT_FILENO, "\x1b[H", 3); 
+    write(STDOUT_FILENO, "\x1b[H", 3);
 
-    // draw editor content and status bar at buttom
+    // draw editor content and status bar at bottom
     editorDrawRows();
     drawStatusBar();
 
@@ -723,7 +873,12 @@ void editorRefreshScreen() {
         ws.ws_row = editor_rows + 1;
     }
     char buf[32];
-    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", cy - rowoff + 1, cx + 1);
+    if (search_mode == 1) {
+        // keep cursor at status bar for query input
+        snprintf(buf, sizeof(buf), "\x1b[%d;%dH", ws.ws_row, (int)strlen(statusmsg) + 1);
+    } else {
+        snprintf(buf, sizeof(buf), "\x1b[%d;%dH", cy - rowoff + 1, cx + 1);
+    }
     write(STDOUT_FILENO, buf, strlen(buf));
 
     fflush(stdout); // ensure immediate output
@@ -738,6 +893,7 @@ int main(int argc, char *argv[]) {
     current_filename = argv[1];
     loadFile(current_filename);
     visual_mode = 0;
+    search_mode = 0;
     clipboard = NULL;
     clip_len = 0;
     rowoff = 0;
