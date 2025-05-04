@@ -4,24 +4,39 @@
 #include <string.h>
 #include <termios.h>
 #include <unistd.h>
+#include <signal.h>
 #include <sys/select.h>
 #include <sys/ioctl.h>
+
 
 /*** Defines ***/
 
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_LINES 100
 
-int editor_rows = 24;
-int editor_cols = 80;
 
 /*** Terminal ***/
 
 struct termios orig_termios;
+volatile sig_atomic_t window_resized = 1;
 
 void die(const char *s);
 void disableRawMode();
 void enableRawMode();
+
+void handleWinch(int sig) {
+    window_resized = 1;
+}
+
+void setupResizeHandler() {
+    struct sigaction sa;
+    sa.sa_handler = handleWinch;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    if (sigaction(SIGWINCH, &sa, NULL) == -1) {
+        die("sigaction");
+    }
+}
 
 /*** Editor State ***/
 
@@ -36,6 +51,8 @@ int sx, sy; // selection start coordinates
 char *clipboard; // buffer for copied text
 int clip_len; // length of clipboard content
 int rowoff; // row offset for scrolling
+int editor_rows = 24;
+int editor_cols = 80;
 
 /*** Input ***/
 
@@ -654,6 +671,8 @@ void updateWindowSize() {
         editor_rows = ws.ws_row - 1;
         editor_cols = ws.ws_col;
     }
+
+    window_resized = 0;
 }
 
 void drawStatusBar() {
@@ -724,10 +743,13 @@ int main(int argc, char *argv[]) {
     rowoff = 0;
     snprintf(statusmsg, sizeof(statusmsg), "[Normal Mode]");
 
+    setupResizeHandler();
     enableRawMode();
     editorRefreshScreen();
     while (1) {
-        // editorRefreshScreen();
+        if (window_resized) {
+            editorRefreshScreen();
+        }
         processKeypress();
     }
 
