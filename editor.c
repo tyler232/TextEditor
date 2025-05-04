@@ -10,10 +10,10 @@
 /*** Defines ***/
 
 #define CTRL_KEY(k) ((k) & 0x1f)
-
-#define EDITOR_ROWS 24
-#define EDITOR_COLS 80
 #define MAX_LINES 100
+
+int editor_rows = 24;
+int editor_cols = 80;
 
 /*** Terminal ***/
 
@@ -143,7 +143,7 @@ void moveCursor(int key) {
             if (cx > 0) cx--;
             break;
         case ARROW_RIGHT:
-            if (cx < EDITOR_COLS - 1) cx++;
+            if (cx < editor_cols - 1) cx++;
             break;
         case ARROW_UP:
             if (cy > 0) cy--;
@@ -157,8 +157,8 @@ void moveCursor(int key) {
     if (cy < rowoff) {
         rowoff = cy;
     }
-    if (cy >= rowoff + EDITOR_ROWS) {
-        rowoff = cy - EDITOR_ROWS + 1;
+    if (cy >= rowoff + editor_rows) {
+        rowoff = cy - editor_rows + 1;
     }
 
     // ensure cursor x doesn't exceed line length
@@ -383,8 +383,8 @@ void cutSelection() {
     if (cy < rowoff) {
         rowoff = cy;
     }
-    if (cy >= rowoff + EDITOR_ROWS) {
-        rowoff = cy - EDITOR_ROWS + 1;
+    if (cy >= rowoff + editor_rows) {
+        rowoff = cy - editor_rows + 1;
     }
 }
 
@@ -472,8 +472,8 @@ void deleteSelection() {
     if (cy < rowoff) {
         rowoff = cy;
     }
-    if (cy >= rowoff + EDITOR_ROWS) {
-        rowoff = cy - EDITOR_ROWS + 1;
+    if (cy >= rowoff + editor_rows) {
+        rowoff = cy - editor_rows + 1;
     }
 }
 
@@ -592,7 +592,7 @@ void processKeypress() {
 }
 
 void editorDrawRows() {
-    for (int y = 0; y < EDITOR_ROWS; y++) {
+    for (int y = 0; y < editor_rows; y++) {
         int file_y = y + rowoff;
         if (file_y < num_lines && lines[file_y]) {
             if (visual_mode) {
@@ -643,12 +643,27 @@ void editorDrawRows() {
     }
 }
 
+void updateWindowSize() {
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
+        // If ioctl fails or reports 0, use defaults
+        editor_rows = 24;
+        editor_cols = 80;
+    } else {
+        // Subtract 1 row for the status bar
+        editor_rows = ws.ws_row - 1;
+        editor_cols = ws.ws_col;
+    }
+}
+
 void drawStatusBar() {
+    updateWindowSize();
+
     struct winsize ws;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1) {
         // fallback to a reasonable default if ioctl fails
-        ws.ws_row = EDITOR_ROWS + 1;
-        ws.ws_col = EDITOR_COLS;
+        ws.ws_row = editor_rows + 1;
+        ws.ws_col = editor_cols;
     }
 
     // move to the bottom row
@@ -674,6 +689,7 @@ void drawStatusBar() {
     write(STDOUT_FILENO, "\x1b[0m", 4);
 }
 
+
 void editorRefreshScreen() {
     write(STDOUT_FILENO, "\x1b[2J", 4);
     write(STDOUT_FILENO, "\x1b[H", 3); 
@@ -685,7 +701,7 @@ void editorRefreshScreen() {
     // move cursor to editor position
     struct winsize ws;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1) {
-        ws.ws_row = EDITOR_ROWS + 1;
+        ws.ws_row = editor_rows + 1;
     }
     char buf[32];
     snprintf(buf, sizeof(buf), "\x1b[%d;%dH", cy - rowoff + 1, cx + 1);
