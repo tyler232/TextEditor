@@ -5,6 +5,7 @@
 #include <termios.h>
 #include <unistd.h>
 #include <sys/select.h>
+#include <sys/ioctl.h>
 
 /*** Defines ***/
 
@@ -60,6 +61,7 @@ void pasteClipboard();
 /*** Output ***/
 
 void editorDrawRows();
+void drawStatusBar();
 void editorRefreshScreen();
 
 /*** File I/O ***/
@@ -542,6 +544,7 @@ void processKeypress() {
     if (c == '\x1b') {
         visual_mode = 0;
         snprintf(statusmsg, sizeof(statusmsg), "[Normal Mode]");
+        editorRefreshScreen();
         return;
     }
 
@@ -551,28 +554,40 @@ void processKeypress() {
         exit(0);
     } else if ((c == CTRL_KEY('v') || c == 'v') && !visual_mode) {
         toggleVisualMode();
+        editorRefreshScreen();
     } else if (c == 'y' && visual_mode) {
         copySelection();
+        editorRefreshScreen();
     } else if (c == 'c' && visual_mode) {
         cutSelection();
+        editorRefreshScreen();
     } else if (c == 'd' && visual_mode) {
         deleteSelection();
+        editorRefreshScreen();
     } else if (c == 'p' && !visual_mode) {
         pasteClipboard();
+        editorRefreshScreen();
     } else if (visual_mode) {
         moveCursor(c); // allow cursor movement in visual mode
+        editorRefreshScreen();
     } else if (c == 127) { // backspace
         deleteChar();
+        editorRefreshScreen();
     } else if (c == '\r') { // Enter
         insertNewline();
+        editorRefreshScreen();
     } else if (c == CTRL_KEY('s')) {
         saveFile(current_filename);
+        editorRefreshScreen();
     } else if (c == CTRL_KEY('o')) { // Open
         loadFile(current_filename);
+        editorRefreshScreen();
     } else if (c >= 32 && c <= 126) {
         insertChar(c);
+        editorRefreshScreen();
     } else {
         moveCursor(c);
+        editorRefreshScreen();
     }
 }
 
@@ -628,19 +643,55 @@ void editorDrawRows() {
     }
 }
 
+void drawStatusBar() {
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1) {
+        // fallback to a reasonable default if ioctl fails
+        ws.ws_row = EDITOR_ROWS + 1;
+        ws.ws_col = EDITOR_COLS;
+    }
+
+    // move to the bottom row
+    char buf[32];
+    snprintf(buf, sizeof(buf), "\x1b[%d;1H", ws.ws_row);
+    write(STDOUT_FILENO, buf, strlen(buf));
+
+    // clear the line and enable reverse video
+    write(STDOUT_FILENO, "\x1b[K", 3); // Clear line
+    write(STDOUT_FILENO, "\x1b[7m", 4); // Reverse video
+
+    // write status message, truncate if too long
+    int msg_len = strlen(statusmsg);
+    if (msg_len > ws.ws_col) msg_len = ws.ws_col;
+    write(STDOUT_FILENO, statusmsg, msg_len);
+
+    // Pad with spaces to fill the row
+    for (int i = msg_len; i < ws.ws_col; i++) {
+        write(STDOUT_FILENO, " ", 1);
+    }
+
+    // reset attributes
+    write(STDOUT_FILENO, "\x1b[0m", 4);
+}
+
 void editorRefreshScreen() {
-    write(STDOUT_FILENO, "\x1b[2J", 4); // clear screen
-    write(STDOUT_FILENO, "\x1b[H", 3);  // cursor to top-left
+    write(STDOUT_FILENO, "\x1b[2J", 4);
+    write(STDOUT_FILENO, "\x1b[H", 3); 
 
+    // draw editor content and status bar at buttom
     editorDrawRows();
-    write(STDOUT_FILENO, "\x1b[24;1H", 7); // move cursor to bottom row
-    write(STDOUT_FILENO, statusmsg, strlen(statusmsg));
-    fflush(stdout); // Ensure immediate output
+    drawStatusBar();
 
-    // move cursor to actual editor position
+    // move cursor to editor position
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1) {
+        ws.ws_row = EDITOR_ROWS + 1;
+    }
     char buf[32];
     snprintf(buf, sizeof(buf), "\x1b[%d;%dH", cy - rowoff + 1, cx + 1);
     write(STDOUT_FILENO, buf, strlen(buf));
+
+    fflush(stdout); // ensure immediate output
 }
 
 int main(int argc, char *argv[]) {
@@ -658,9 +709,9 @@ int main(int argc, char *argv[]) {
     snprintf(statusmsg, sizeof(statusmsg), "[Normal Mode]");
 
     enableRawMode();
-
+    editorRefreshScreen();
     while (1) {
-        editorRefreshScreen();
+        // editorRefreshScreen();
         processKeypress();
     }
 
